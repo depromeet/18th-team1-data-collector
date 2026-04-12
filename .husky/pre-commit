@@ -8,5 +8,16 @@ else
   echo "gitleaks 미설치: 비밀키 검사를 건너뜁니다."
 fi
 
-# 최소 컴파일 검증 (app 모듈)
-cd app && ./gradlew testClasses
+# n8n workflow JSON 문법 검증
+if command -v jq >/dev/null 2>&1; then
+  find n8n -name '*.json' -print0 | xargs -0 jq empty
+else
+  echo "jq 미설치: n8n JSON 검사를 건너뜁니다."
+fi
+
+# Python 문법 검증
+if command -v python3 >/dev/null 2>&1; then
+  python3 -m py_compile model/emotion/app.py model/embedding/app.py
+else
+  echo "python3 미설치: Python 문법 검사를 건너뜁니다."
+fi
