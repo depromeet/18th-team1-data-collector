@@ -1,0 +1,204 @@
+{
+  "name": "소설 명문장 가공",
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "trigger",
+      "name": "Manual Trigger",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [0, 0]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "CREATE EXTENSION IF NOT EXISTS vector;\n\nCREATE TABLE IF NOT EXISTS book_quote_staging (\n    id BIGSERIAL PRIMARY KEY,\n    title VARCHAR(500) NOT NULL,\n    author VARCHAR(200) NOT NULL,\n    quote TEXT NOT NULL,\n    category VARCHAR(100),\n    batch_index INTEGER,\n    batch_size INTEGER,\n    raw_emotions TEXT[],\n    emotion_labels TEXT[],\n    embedding vector(768),\n    status VARCHAR(30) NOT NULL DEFAULT 'collected',\n    needs_review BOOLEAN NOT NULL DEFAULT FALSE,\n    retry_count INTEGER NOT NULL DEFAULT 0,\n    error_reason TEXT,\n    created_at TIMESTAMP DEFAULT NOW(),\n    processed_at TIMESTAMP,\n    UNIQUE(title, author)\n);\n\nCREATE INDEX IF NOT EXISTS idx_book_quote_staging_status\nON book_quote_staging (status, created_at);\n\nCREATE INDEX IF NOT EXISTS idx_book_quote_staging_category\nON book_quote_staging (category);",
+        "options": {}
+      },
+      "id": "ensure-staging",
+      "name": "Staging 테이블 준비",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [220, 0],
+      "credentials": {
+        "postgres": {
+          "id": "postgres-cred",
+          "name": "PostgreSQL - book_quotes"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT id, title, author, quote, category\nFROM book_quote_staging\nWHERE status = 'collected'\nORDER BY id\nLIMIT 20;",
+        "options": {
+          "nodeVersion": 2.5
+        }
+      },
+      "id": "load-staging",
+      "name": "Staging 조회",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [440, 0],
+      "credentials": {
+        "postgres": {
+          "id": "postgres-cred",
+          "name": "PostgreSQL - book_quotes"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "batchSize": 1,
+        "options": {
+          "reset": false
+        }
+      },
+      "id": "split-items",
+      "name": "데이터 순회",
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [660, 0]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://host.docker.internal:8001/emotion",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "content-type", "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"inputs\": {{ JSON.stringify($json.quote) }}\n}",
+        "options": {
+          "timeout": 120000
+        }
+      },
+      "id": "emotion-request",
+      "name": "1차 감정분석 요청",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [880, 0]
+    },
+    {
+      "parameters": {
+        "jsCode": "const firstJson = $input.first().json;\nconst row = $('데이터 순회').item.json;\n\nconst emotionData = Array.isArray(firstJson)\n  ? firstJson\n  : $input.all().map(item => item.json);\n\nif (!Array.isArray(emotionData) || emotionData.length === 0) {\n  throw new Error('1차 감정분석 응답 오류: ' + JSON.stringify(firstJson).slice(0, 500));\n}\n\nconst sorted = emotionData\n  .filter(e => typeof e.score === 'number' && e.label)\n  .sort((a, b) => b.score - a.score);\n\nconst rawEmotions = sorted\n  .filter(e => e.score > 0.3)\n  .slice(0, 10)\n  .map(e => e.label);\n\nconst top1 = sorted[0]?.score ?? 0;\nconst top2 = sorted[1]?.score ?? 0;\nconst needs_review = rawEmotions.length === 0 || top1 < 0.75 || (top1 - top2) < 0.12;\nconst emotion_labels = rawEmotions.length > 0 ? rawEmotions : ['없음'];\n\nreturn [{\n  json: {\n    ...row,\n    raw_emotions: rawEmotions,\n    emotion_labels,\n    needs_review,\n    top1_score: top1,\n    score_gap: top1 - top2\n  }\n}];"
+      },
+      "id": "parse-emotion",
+      "name": "1차 감정분석 파싱",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1100, 0]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://host.docker.internal:8002/embedding",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "content-type", "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"inputs\": {{ JSON.stringify($json.quote) }}\n}",
+        "options": {
+          "timeout": 120000
+        }
+      },
+      "id": "embedding-request",
+      "name": "임베딩 요청",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1320, 0]
+    },
+    {
+      "parameters": {
+        "jsCode": "const embedData = $input.first().json;\nconst row = $('1차 감정분석 파싱').item.json;\n\nif (!Array.isArray(embedData?.embedding)) {\n  throw new Error('임베딩 응답 오류: ' + JSON.stringify(embedData).slice(0, 500));\n}\n\nreturn [{\n  json: {\n    ...row,\n    embedding: '[' + embedData.embedding.join(',') + ']'\n  }\n}];"
+      },
+      "id": "parse-embedding",
+      "name": "임베딩 파싱",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1540, 0]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO books (title, author, quote, category, emotion_labels, embedding)\nVALUES (\n  '{{ $json.title.replace(/'/g, \"''\") }}',\n  '{{ $json.author.replace(/'/g, \"''\") }}',\n  '{{ $json.quote.replace(/'/g, \"''\") }}',\n  '{{ ($json.category || 'unknown').replace(/'/g, \"''\") }}',\n  ARRAY[{{ $json.emotion_labels.map(e => \"'\" + e.replace(/'/g, \"''\") + \"'\").join(',') }}]::TEXT[],\n  '{{ $json.embedding }}'::vector\n)\nON CONFLICT (title, author) DO UPDATE SET\n  quote = EXCLUDED.quote,\n  category = EXCLUDED.category,\n  emotion_labels = EXCLUDED.emotion_labels,\n  embedding = EXCLUDED.embedding;",
+        "options": {}
+      },
+      "id": "upsert-books",
+      "name": "Books 적재",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [1760, 0],
+      "credentials": {
+        "postgres": {
+          "id": "postgres-cred",
+          "name": "PostgreSQL - book_quotes"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "UPDATE book_quote_staging\nSET raw_emotions = ARRAY[{{ $('임베딩 파싱').item.json.raw_emotions.map(e => \"'\" + e.replace(/'/g, \"''\") + \"'\").join(',') }}]::TEXT[],\n    emotion_labels = ARRAY[{{ $('임베딩 파싱').item.json.emotion_labels.map(e => \"'\" + e.replace(/'/g, \"''\") + \"'\").join(',') }}]::TEXT[],\n    embedding = '{{ $('임베딩 파싱').item.json.embedding }}'::vector,\n    needs_review = {{ $('임베딩 파싱').item.json.needs_review ? 'TRUE' : 'FALSE' }},\n    status = '{{ $('임베딩 파싱').item.json.needs_review ? 'review_pending' : 'done' }}',\n    processed_at = NOW(),\n    error_reason = NULL\nWHERE id = {{ $('임베딩 파싱').item.json.id }};",
+        "options": {}
+      },
+      "id": "update-staging",
+      "name": "Staging 상태 업데이트",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [1980, 0],
+      "credentials": {
+        "postgres": {
+          "id": "postgres-cred",
+          "name": "PostgreSQL - book_quotes"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Manual Trigger": {
+      "main": [[{ "node": "Staging 테이블 준비", "type": "main", "index": 0 }]]
+    },
+    "Staging 테이블 준비": {
+      "main": [[{ "node": "Staging 조회", "type": "main", "index": 0 }]]
+    },
+    "Staging 조회": {
+      "main": [[{ "node": "데이터 순회", "type": "main", "index": 0 }]]
+    },
+    "데이터 순회": {
+      "main": [
+        [{ "node": "1차 감정분석 요청", "type": "main", "index": 0 }],
+        []
+      ]
+    },
+    "1차 감정분석 요청": {
+      "main": [[{ "node": "1차 감정분석 파싱", "type": "main", "index": 0 }]]
+    },
+    "1차 감정분석 파싱": {
+      "main": [[{ "node": "임베딩 요청", "type": "main", "index": 0 }]]
+    },
+    "임베딩 요청": {
+      "main": [[{ "node": "임베딩 파싱", "type": "main", "index": 0 }]]
+    },
+    "임베딩 파싱": {
+      "main": [[{ "node": "Books 적재", "type": "main", "index": 0 }]]
+    },
+    "Books 적재": {
+      "main": [[{ "node": "Staging 상태 업데이트", "type": "main", "index": 0 }]]
+    },
+    "Staging 상태 업데이트": {
+      "main": [[{ "node": "데이터 순회", "type": "main", "index": 0 }]]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  }
+}

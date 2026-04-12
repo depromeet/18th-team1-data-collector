@@ -1,0 +1,179 @@
+{
+  "name": "소설 명문장 재검토",
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "trigger",
+      "name": "Manual Trigger",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [0, 0]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "CREATE EXTENSION IF NOT EXISTS vector;\n\nCREATE TABLE IF NOT EXISTS book_quote_staging (\n    id BIGSERIAL PRIMARY KEY,\n    title VARCHAR(500) NOT NULL,\n    author VARCHAR(200) NOT NULL,\n    quote TEXT NOT NULL,\n    category VARCHAR(100),\n    batch_index INTEGER,\n    batch_size INTEGER,\n    raw_emotions TEXT[],\n    emotion_labels TEXT[],\n    embedding vector(768),\n    status VARCHAR(30) NOT NULL DEFAULT 'collected',\n    needs_review BOOLEAN NOT NULL DEFAULT FALSE,\n    retry_count INTEGER NOT NULL DEFAULT 0,\n    error_reason TEXT,\n    created_at TIMESTAMP DEFAULT NOW(),\n    processed_at TIMESTAMP,\n    UNIQUE(title, author)\n);\n\nCREATE INDEX IF NOT EXISTS idx_book_quote_staging_status\nON book_quote_staging (status, created_at);\n\nCREATE INDEX IF NOT EXISTS idx_book_quote_staging_category\nON book_quote_staging (category);",
+        "options": {}
+      },
+      "id": "ensure-staging",
+      "name": "Staging 테이블 준비",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [220, 0],
+      "credentials": {
+        "postgres": {
+          "id": "postgres-cred",
+          "name": "PostgreSQL - book_quotes"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT id, title, author, quote, category, raw_emotions, emotion_labels\nFROM book_quote_staging\nWHERE status = 'review_pending'\nORDER BY processed_at NULLS FIRST, id\nLIMIT 10;",
+        "options": {
+          "nodeVersion": 2.5
+        }
+      },
+      "id": "load-review",
+      "name": "재검토 대상 조회",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [440, 0],
+      "credentials": {
+        "postgres": {
+          "id": "postgres-cred",
+          "name": "PostgreSQL - book_quotes"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "batchSize": 1,
+        "options": {
+          "reset": false
+        }
+      },
+      "id": "split-items",
+      "name": "데이터 순회",
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [660, 0]
+    },
+    {
+      "parameters": {
+        "jsCode": "const row = $input.first().json;\nconst rawEmotions = Array.isArray(row.raw_emotions) && row.raw_emotions.length > 0\n  ? row.raw_emotions\n  : Array.isArray(row.emotion_labels) && row.emotion_labels.length > 0\n    ? row.emotion_labels\n    : ['없음'];\n\nconst prompt = `다음 소설 문장에 대해 감정 라벨을 다시 검토해주세요.\\n\\n책: ${row.title} (${row.author})\\n문장: ${row.quote}\\n1차 감정 결과: ${rawEmotions.join(', ')}\\n\\n요구사항:\\n- 문맥에 실제로 맞는 감정만 남길 것\\n- 필요하면 라벨 수를 줄일 것\\n- 설명 없이 JSON 배열만 반환할 것\\n예: [\"슬픔\", \"외로움\"]`;\n\nreturn [{\n  json: {\n    ...row,\n    raw_emotions: rawEmotions,\n    prompt\n  }\n}];"
+      },
+      "id": "build-prompt",
+      "name": "재검토 프롬프트 생성",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [880, 0]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.groq.com/openai/v1/chat/completions",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Authorization", "value": "Bearer YOUR_GROQ_API_KEY" },
+            { "name": "content-type", "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"model\": \"llama-3.3-70b-versatile\",\n  \"max_tokens\": 200,\n  \"temperature\": 0.2,\n  \"messages\": [\n    {\n      \"role\": \"user\",\n      \"content\": {{ JSON.stringify($json.prompt) }}\n    }\n  ]\n}",
+        "options": {
+          "timeout": 120000
+        }
+      },
+      "id": "groq-review",
+      "name": "Groq - 2차 감정 검증",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1100, 0]
+    },
+    {
+      "parameters": {
+        "jsCode": "const response = $input.first().json;\nconst row = $('재검토 프롬프트 생성').item.json;\n\nconst verifyText = response?.choices?.[0]?.message?.content;\nif (!verifyText) {\n  throw new Error('Groq 2차 검증 응답 오류: ' + JSON.stringify(response).slice(0, 500));\n}\n\nconst extractJSONArray = (source) => {\n  const cleaned = source.replace(/```json\\s*/gi, '').replace(/```/g, '').trim();\n  const start = cleaned.indexOf('[');\n  const end = cleaned.lastIndexOf(']');\n  if (start === -1 || end === -1 || end <= start) {\n    return null;\n  }\n  return cleaned.slice(start, end + 1);\n};\n\nconst tryParse = (raw) => {\n  try {\n    return JSON.parse(raw);\n  } catch (e) {\n    const repaired = raw\n      .replace(/,\\s*([}\\]])/g, '$1')\n      .replace(/[\\u201C\\u201D]/g, '\"')\n      .replace(/[\\u2018\\u2019]/g, \"'\");\n    return JSON.parse(repaired);\n  }\n};\n\nconst isNonEmptyString = (value) => typeof value === 'string' && value.trim().length > 0;\n\nconst rawJson = extractJSONArray(verifyText);\nlet emotion_labels = row.raw_emotions;\nif (rawJson) {\n  const parsed = tryParse(rawJson);\n  if (Array.isArray(parsed)) {\n    const normalized = parsed.filter(isNonEmptyString).map(label => label.trim());\n    if (normalized.length > 0) {\n      emotion_labels = normalized;\n    }\n  }\n}\n\nreturn [{\n  json: {\n    ...row,\n    emotion_labels\n  }\n}];"
+      },
+      "id": "parse-review",
+      "name": "재검토 응답 파싱",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1320, 0]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "UPDATE books\nSET emotion_labels = ARRAY[{{ $json.emotion_labels.map(e => \"'\" + e.replace(/'/g, \"''\") + \"'\").join(',') }}]::TEXT[]\nWHERE title = '{{ $json.title.replace(/'/g, \"''\") }}'\n  AND author = '{{ $json.author.replace(/'/g, \"''\") }}';",
+        "options": {}
+      },
+      "id": "update-books",
+      "name": "Books 감정 업데이트",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [1540, 0],
+      "credentials": {
+        "postgres": {
+          "id": "postgres-cred",
+          "name": "PostgreSQL - book_quotes"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "UPDATE book_quote_staging\nSET emotion_labels = ARRAY[{{ $('재검토 응답 파싱').item.json.emotion_labels.map(e => \"'\" + e.replace(/'/g, \"''\") + \"'\").join(',') }}]::TEXT[],\n    status = 'done',\n    needs_review = FALSE,\n    error_reason = NULL,\n    processed_at = NOW()\nWHERE id = {{ $('재검토 응답 파싱').item.json.id }};",
+        "options": {}
+      },
+      "id": "update-staging",
+      "name": "Staging 재검토 완료",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [1760, 0],
+      "credentials": {
+        "postgres": {
+          "id": "postgres-cred",
+          "name": "PostgreSQL - book_quotes"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Manual Trigger": {
+      "main": [[{ "node": "Staging 테이블 준비", "type": "main", "index": 0 }]]
+    },
+    "Staging 테이블 준비": {
+      "main": [[{ "node": "재검토 대상 조회", "type": "main", "index": 0 }]]
+    },
+    "재검토 대상 조회": {
+      "main": [[{ "node": "데이터 순회", "type": "main", "index": 0 }]]
+    },
+    "데이터 순회": {
+      "main": [
+        [{ "node": "재검토 프롬프트 생성", "type": "main", "index": 0 }],
+        []
+      ]
+    },
+    "재검토 프롬프트 생성": {
+      "main": [[{ "node": "Groq - 2차 감정 검증", "type": "main", "index": 0 }]]
+    },
+    "Groq - 2차 감정 검증": {
+      "main": [[{ "node": "재검토 응답 파싱", "type": "main", "index": 0 }]]
+    },
+    "재검토 응답 파싱": {
+      "main": [[{ "node": "Books 감정 업데이트", "type": "main", "index": 0 }]]
+    },
+    "Books 감정 업데이트": {
+      "main": [[{ "node": "Staging 재검토 완료", "type": "main", "index": 0 }]]
+    },
+    "Staging 재검토 완료": {
+      "main": [[{ "node": "데이터 순회", "type": "main", "index": 0 }]]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  }
+}
