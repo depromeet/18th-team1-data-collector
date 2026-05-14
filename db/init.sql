@@ -62,38 +62,55 @@ END $$;
 
 CREATE TABLE IF NOT EXISTS books (
     id BIGSERIAL PRIMARY KEY,
-    title VARCHAR(500) NOT NULL,
-    author VARCHAR(200) NOT NULL,
-    normalized_title VARCHAR(500) NOT NULL,
-    normalized_author VARCHAR(200) NOT NULL,
-    category VARCHAR(100),
+    title TEXT NOT NULL,
+    author TEXT NOT NULL,
+    normalized_title TEXT NOT NULL,
+    normalized_author TEXT NOT NULL,
+    category TEXT,
     isbn13 VARCHAR(20),
-    publisher VARCHAR(200),
+    publisher TEXT,
     published_at DATE,
     aladin_status VARCHAR(30) NOT NULL DEFAULT 'staged',
     aladin_item_id BIGINT,
     aladin_link TEXT,
     aladin_cover_url TEXT,
     aladin_category_name TEXT,
-    aladin_description TEXT,
     cover_image_url TEXT,
     retry_count INTEGER NOT NULL DEFAULT 0,
     next_retry_at TIMESTAMP NOT NULL DEFAULT NOW(),
     error_reason TEXT,
+    quote_extract_status BOOLEAN NOT NULL DEFAULT FALSE,
+    quote_extract_retry_count INTEGER NOT NULL DEFAULT 0,
+    quote_extract_next_retry_at TIMESTAMP NOT NULL DEFAULT NOW(),
+    quote_extract_error_reason TEXT,
+    quote_extracted_at TIMESTAMP,
     created_at TIMESTAMP NOT NULL DEFAULT NOW(),
     validated_at TIMESTAMP,
     UNIQUE(normalized_title, normalized_author)
 );
 
 ALTER TABLE books ADD COLUMN IF NOT EXISTS isbn13 VARCHAR(20);
-ALTER TABLE books ADD COLUMN IF NOT EXISTS publisher VARCHAR(200);
+ALTER TABLE books ADD COLUMN IF NOT EXISTS publisher TEXT;
 ALTER TABLE books ADD COLUMN IF NOT EXISTS published_at DATE;
 ALTER TABLE books ADD COLUMN IF NOT EXISTS aladin_status VARCHAR(30) NOT NULL DEFAULT 'staged';
 ALTER TABLE books ADD COLUMN IF NOT EXISTS aladin_item_id BIGINT;
 ALTER TABLE books ADD COLUMN IF NOT EXISTS aladin_link TEXT;
 ALTER TABLE books ADD COLUMN IF NOT EXISTS aladin_cover_url TEXT;
 ALTER TABLE books ADD COLUMN IF NOT EXISTS aladin_category_name TEXT;
-ALTER TABLE books ADD COLUMN IF NOT EXISTS aladin_description TEXT;
+ALTER TABLE books ADD COLUMN IF NOT EXISTS cover_image_url TEXT;
+ALTER TABLE books ADD COLUMN IF NOT EXISTS quote_extract_status BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE books ADD COLUMN IF NOT EXISTS quote_extract_retry_count INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE books ADD COLUMN IF NOT EXISTS quote_extract_next_retry_at TIMESTAMP NOT NULL DEFAULT NOW();
+ALTER TABLE books ADD COLUMN IF NOT EXISTS quote_extract_error_reason TEXT;
+ALTER TABLE books ADD COLUMN IF NOT EXISTS quote_extracted_at TIMESTAMP;
+
+ALTER TABLE books
+    ALTER COLUMN title TYPE TEXT,
+    ALTER COLUMN author TYPE TEXT,
+    ALTER COLUMN normalized_title TYPE TEXT,
+    ALTER COLUMN normalized_author TYPE TEXT,
+    ALTER COLUMN category TYPE TEXT,
+    ALTER COLUMN publisher TYPE TEXT;
 
 CREATE TABLE IF NOT EXISTS quotes (
     id BIGSERIAL PRIMARY KEY,
@@ -129,6 +146,7 @@ CREATE TABLE IF NOT EXISTS quotes (
 
 CREATE INDEX IF NOT EXISTS idx_books_category ON books (category);
 CREATE INDEX IF NOT EXISTS idx_books_aladin_status ON books (aladin_status, created_at);
+CREATE INDEX IF NOT EXISTS idx_books_quote_extract_queue ON books (quote_extract_status, quote_extract_next_retry_at);
 CREATE INDEX IF NOT EXISTS idx_quotes_book_id ON quotes (book_id);
 CREATE INDEX IF NOT EXISTS idx_quotes_quote_check_queue ON quotes (quote_check_status, quote_check_next_retry_at);
 CREATE INDEX IF NOT EXISTS idx_quotes_emotion_queue ON quotes (emotion_status, emotion_next_retry_at);
