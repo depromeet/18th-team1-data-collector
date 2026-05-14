@@ -1,0 +1,97 @@
+{
+  "name": "문장 임베딩",
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "trigger",
+      "name": "Manual Trigger",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [0, 0]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT id, quote_raw, embedding_retry_count\nFROM quotes\nWHERE quote_check_status = 'validated'\n  AND emotion_status = 'validated'\n  AND embedding_status IN ('staged', 'retry_wait')\n  AND embedding_next_retry_at <= NOW()\nORDER BY embedding_next_retry_at, id\nLIMIT 20;",
+        "options": {
+          "nodeVersion": 2.5
+        }
+      },
+      "id": "load-embedding-targets",
+      "name": "임베딩 대상 조회",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [220, 0],
+      "credentials": {
+        "postgres": {
+          "id": "postgres-cred",
+          "name": "PostgreSQL - depromeet-team1"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "batchSize": 1,
+        "options": {
+          "reset": false
+        }
+      },
+      "id": "split-embedding-targets",
+      "name": "문장 순회",
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [440, 0]
+    },
+    {
+      "parameters": {
+        "jsCode": "const row = $input.first().json; const endpoint = typeof process !== 'undefined' && process.env && process.env.EMBEDDING_API_URL ? process.env.EMBEDDING_API_URL : 'http://host.docker.internal:8002/embedding'; const backoffSteps = [1, 3, 10, 30, 120]; const nextRetryCount = Number(row.embedding_retry_count || 0) + 1; const nextRetryAt = new Date(Date.now() + backoffSteps[Math.min(nextRetryCount - 1, backoffSteps.length - 1)] * 60000).toISOString(); const response = await fetch(endpoint, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ inputs: row.quote_raw }) }).catch(error => ({ ok: false, status: 0, json: async () => ({ error: error.message }) })); const payload = typeof response.json === 'function' ? await response.json().catch(() => ({})) : {}; if (!response.ok) { return [{ json: { ...row, embedding_status: 'retry_wait', embedding_retry_count: nextRetryCount, embedding_next_retry_at: nextRetryAt, embedding_error_reason: payload?.error || `embedding_${response.status}` } }]; } if (!Array.isArray(payload.embedding) || payload.embedding.length === 0) { return [{ json: { ...row, embedding_status: 'needs_review', embedding_retry_count: row.embedding_retry_count || 0, embedding_next_retry_at: new Date().toISOString(), embedding_error_reason: 'embedding_parse_failed' } }]; } return [{ json: { ...row, embedding_status: 'validated', embedding_retry_count: 0, embedding_next_retry_at: new Date().toISOString(), embedding_error_reason: null, embedding: `[${payload.embedding.join(',')}]`, embedded_at: new Date().toISOString() } }];"
+      },
+      "id": "request-embedding",
+      "name": "임베딩 생성",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [660, 0]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "UPDATE quotes\nSET embedding_status = '{{ $json.embedding_status }}',\n    embedding_retry_count = {{ $json.embedding_retry_count || 0 }},\n    embedding_next_retry_at = '{{ $json.embedding_next_retry_at }}'::timestamp,\n    embedding_error_reason = {{ $json.embedding_error_reason ? \"'\" + $json.embedding_error_reason.replace(/'/g, \"''\") + \"'\" : 'NULL' }},\n    embedding = {{ $json.embedding ? \"'\" + $json.embedding + \"'::vector\" : 'embedding' }},\n    embedded_at = {{ $json.embedded_at ? \"'\" + $json.embedded_at + \"'::timestamp\" : 'embedded_at' }}\nWHERE id = {{ $json.id }};",
+        "options": {}
+      },
+      "id": "update-embedding",
+      "name": "임베딩 업데이트",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [880, 0],
+      "credentials": {
+        "postgres": {
+          "id": "postgres-cred",
+          "name": "PostgreSQL - depromeet-team1"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Manual Trigger": {
+      "main": [[{ "node": "임베딩 대상 조회", "type": "main", "index": 0 }]]
+    },
+    "임베딩 대상 조회": {
+      "main": [[{ "node": "문장 순회", "type": "main", "index": 0 }]]
+    },
+    "문장 순회": {
+      "main": [
+        [{ "node": "임베딩 생성", "type": "main", "index": 0 }],
+        []
+      ]
+    },
+    "임베딩 생성": {
+      "main": [[{ "node": "임베딩 업데이트", "type": "main", "index": 0 }]]
+    },
+    "임베딩 업데이트": {
+      "main": [[{ "node": "문장 순회", "type": "main", "index": 0 }]]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  }
+}

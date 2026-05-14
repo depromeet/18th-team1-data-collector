@@ -1,0 +1,97 @@
+{
+  "name": "문장 검수",
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "trigger",
+      "name": "Manual Trigger",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [0, 0]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT q.id, q.quote_raw, q.quote_check_retry_count, b.title, b.author\nFROM quotes q\nJOIN books b ON b.id = q.book_id\nWHERE b.aladin_status = 'validated'\n  AND q.quote_check_status IN ('staged', 'retry_wait')\n  AND q.quote_check_next_retry_at <= NOW()\nORDER BY q.quote_check_next_retry_at, q.id\nLIMIT 10;",
+        "options": {
+          "nodeVersion": 2.5
+        }
+      },
+      "id": "load-quotes",
+      "name": "검수 대상 조회",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [220, 0],
+      "credentials": {
+        "postgres": {
+          "id": "postgres-cred",
+          "name": "PostgreSQL - depromeet-team1"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "batchSize": 1,
+        "options": {
+          "reset": false
+        }
+      },
+      "id": "split-quotes",
+      "name": "문장 순회",
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [440, 0]
+    },
+    {
+      "parameters": {
+        "jsCode": "const row = $input.first().json; const apiKey = typeof process !== 'undefined' && process.env && process.env.GROQ_API_KEY ? process.env.GROQ_API_KEY : 'YOUR_GROQ_API_KEY'; const model = 'llama-3.3-70b-versatile'; const backoffSteps = [1, 3, 10, 30, 120]; const nextRetryCount = Number(row.quote_check_retry_count || 0) + 1; const nextRetryAt = new Date(Date.now() + backoffSteps[Math.min(nextRetryCount - 1, backoffSteps.length - 1)] * 60000).toISOString(); const prompt = `다음 문장을 검수하세요.\\n\\n책: ${row.title} (${row.author})\\n문장: ${row.quote_raw}\\n\\n판정 기준:\\n- 실제 책 문장으로 보이는지\\n- 문자 깨짐이나 메타 텍스트가 없는지\\n- 문장으로서 자연스러운지\\n\\n반드시 아래 JSON 객체만 반환하세요.\\n{\\\"valid\\\":true,\\\"reason\\\":null,\\\"issues\\\":[\\\"문제없음\\\"]}`; const response = await fetch('https://api.groq.com/openai/v1/chat/completions', { method: 'POST', headers: { Authorization: `Bearer ${apiKey}`, 'content-type': 'application/json' }, body: JSON.stringify({ model, temperature: 0.1, max_tokens: 250, messages: [{ role: 'user', content: prompt }] }) }).catch(error => ({ ok: false, status: 0, json: async () => ({ error: { message: error.message } }) })); const payload = typeof response.json === 'function' ? await response.json().catch(() => ({})) : {}; if (!response.ok) { return [{ json: { ...row, quote_check_status: 'retry_wait', quote_check_retry_count: nextRetryCount, quote_check_next_retry_at: nextRetryAt, quote_check_error_reason: payload?.error?.message || `quote_review_${response.status}` } }]; } const text = payload?.choices?.[0]?.message?.content || ''; const cleaned = text.replace(/```json\\s*/gi, '').replace(/```/g, '').trim(); const start = cleaned.indexOf('{'); const end = cleaned.lastIndexOf('}'); if (start === -1 || end === -1 || end <= start) { return [{ json: { ...row, quote_check_status: 'needs_review', quote_check_retry_count: row.quote_check_retry_count || 0, quote_check_next_retry_at: new Date().toISOString(), quote_check_error_reason: 'quote_review_parse_failed' } }]; } let result; try { result = JSON.parse(cleaned.slice(start, end + 1)); } catch (error) { return [{ json: { ...row, quote_check_status: 'needs_review', quote_check_retry_count: row.quote_check_retry_count || 0, quote_check_next_retry_at: new Date().toISOString(), quote_check_error_reason: `quote_review_json:${error.message}` } }]; } if (result.valid === true) { return [{ json: { ...row, quote_check_status: 'validated', quote_check_retry_count: 0, quote_check_next_retry_at: new Date().toISOString(), quote_check_error_reason: null, quote_checked_at: new Date().toISOString() } }]; } return [{ json: { ...row, quote_check_status: 'needs_review', quote_check_retry_count: row.quote_check_retry_count || 0, quote_check_next_retry_at: new Date().toISOString(), quote_check_error_reason: result.reason || 'quote_review_invalid' } }];"
+      },
+      "id": "review-quote",
+      "name": "LLM 문장 검수",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [660, 0]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "UPDATE quotes\nSET quote_check_status = '{{ $json.quote_check_status }}',\n    quote_check_retry_count = {{ $json.quote_check_retry_count || 0 }},\n    quote_check_next_retry_at = '{{ $json.quote_check_next_retry_at }}'::timestamp,\n    quote_check_error_reason = {{ $json.quote_check_error_reason ? \"'\" + $json.quote_check_error_reason.replace(/'/g, \"''\") + \"'\" : 'NULL' }},\n    quote_checked_at = {{ $json.quote_checked_at ? \"'\" + $json.quote_checked_at + \"'::timestamp\" : 'quote_checked_at' }}\nWHERE id = {{ $json.id }};",
+        "options": {}
+      },
+      "id": "update-quote",
+      "name": "문장 상태 업데이트",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [880, 0],
+      "credentials": {
+        "postgres": {
+          "id": "postgres-cred",
+          "name": "PostgreSQL - depromeet-team1"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Manual Trigger": {
+      "main": [[{ "node": "검수 대상 조회", "type": "main", "index": 0 }]]
+    },
+    "검수 대상 조회": {
+      "main": [[{ "node": "문장 순회", "type": "main", "index": 0 }]]
+    },
+    "문장 순회": {
+      "main": [
+        [{ "node": "LLM 문장 검수", "type": "main", "index": 0 }],
+        []
+      ]
+    },
+    "LLM 문장 검수": {
+      "main": [[{ "node": "문장 상태 업데이트", "type": "main", "index": 0 }]]
+    },
+    "문장 상태 업데이트": {
+      "main": [[{ "node": "문장 순회", "type": "main", "index": 0 }]]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  }
+}

@@ -1,0 +1,258 @@
+{
+  "name": "알라딘 책 수집",
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "trigger",
+      "name": "Manual Trigger",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        0,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const maxResults = 50;\nconst listTypes = [\n  { listType: 'Bestseller', label: '베스트셀러' },\n  { listType: 'BlogBest', label: '북플 베스트셀러' },\n  { listType: 'ItemNewAll', label: '신간 전체' },\n  { listType: 'ItemNewSpecial', label: '주목할 만한 신간' },\n  { listType: 'ItemEditorChoice', label: '편집자 추천' },\n];\n\n// 알라딘 국내도서 > 소설/시/희곡 하위 카테고리 CID.\n// 요청한 제외 범위: 한국소설, 영미소설, 일본소설, 로맨스소설, 추리/미스터리소설, 판타지/환상문학, 세계의 소설, 시, 과학소설(SF), 역사소설 제외.\nconst categoryGroups = [\n  { categoryId: 50921, label: '프랑스소설', pages: 5 },\n  { categoryId: 50922, label: '독일소설', pages: 4 },\n  { categoryId: 50923, label: '중국소설', pages: 4 },\n  { categoryId: 52650, label: '러시아소설', pages: 4 },\n  { categoryId: 50920, label: '스페인/중남미소설', pages: 4 },\n  { categoryId: 50933, label: '액션/스릴러소설', pages: 4 },\n  { categoryId: 50955, label: '세계의 문학', pages: 4 },\n  { categoryId: 50931, label: '호러.공포소설', pages: 3 },\n  { categoryId: 50948, label: '희곡', pages: 3 },\n  { categoryId: 50932, label: '무협소설', pages: 2 },\n];\n\nconst batches = [];\nfor (const group of categoryGroups) {\n  for (const list of listTypes) {\n    for (let page = 1; page <= group.pages; page += 1) {\n      batches.push({\n        json: {\n          category: group.label,\n          categoryId: group.categoryId,\n          listType: list.listType,\n          listLabel: list.label,\n          start: page,\n          maxResults,\n        },\n      });\n    }\n  }\n}\nreturn batches;"
+      },
+      "id": "generate-search-batches",
+      "name": "검색 배치 생성",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        220,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "batchSize": 1,
+        "options": {
+          "reset": false
+        }
+      },
+      "id": "split-search-batches",
+      "name": "검색 배치 순회",
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [
+        440,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "url": "https://www.aladin.co.kr/ttb/api/ItemList.aspx",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "ttbkey",
+              "value": "YOUR_ALADIN_TTB_KEY"
+            },
+            {
+              "name": "QueryType",
+              "value": "={{ $json.listType }}"
+            },
+            {
+              "name": "CategoryId",
+              "value": "={{ $json.categoryId }}"
+            },
+            {
+              "name": "MaxResults",
+              "value": "={{ $json.maxResults }}"
+            },
+            {
+              "name": "start",
+              "value": "={{ $json.start }}"
+            },
+            {
+              "name": "SearchTarget",
+              "value": "Book"
+            },
+            {
+              "name": "output",
+              "value": "js"
+            },
+            {
+              "name": "Version",
+              "value": "20131101"
+            },
+            {
+              "name": "Cover",
+              "value": "Big"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 120000
+        }
+      },
+      "id": "request-aladin",
+      "name": "알라딘 도서 검색",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        660,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const rawResponse = $input.first().json;\nconst batch = $('검색 배치 순회').first().json;\nconst normalize = value => String(value || '')\n  .normalize('NFKC')\n  .toLowerCase()\n  .replace(/[“”‘’\"']/g, '')\n  .replace(/\\([^)]*\\)/g, ' ')\n  .replace(/[^0-9a-zA-Z가-힣\\s]/g, ' ')\n  .replace(/\\s+/g, ' ')\n  .trim();\nconst cleanText = value => String(value || '')\n  .normalize('NFKC')\n  .replace(/[\\u0000-\\u001F\\u007F]/g, ' ')\n  .replace(/\\s+/g, ' ')\n  .trim();\nconst parsePayload = value => {\n  if (value && typeof value === 'object' && Array.isArray(value.item)) return value;\n  const raw = typeof value === 'string'\n    ? value\n    : typeof value?.data === 'string'\n      ? value.data\n      : typeof value?.body === 'string'\n        ? value.body\n        : '';\n  if (!raw) return value || {};\n  const cleaned = raw.trim().replace(/^\\w+\\s*=\\s*/, '').replace(/;\\s*$/, '');\n  return JSON.parse(cleaned);\n};\nconst hasBrokenOrOriginalScript = value => /[\\uFFFD\\u3040-\\u30FF\\u3400-\\u9FFF]/.test(String(value || ''));\nconst hasHangul = value => /[가-힣]/.test(String(value || ''));\nconst isKoreanTitleOnly = value => /^[가-힣\\s]+$/.test(String(value || '').trim());\nconst parseDate = value => /^\\d{4}-\\d{2}-\\d{2}$/.test(String(value || '')) ? value : null;\nconst truncateText = (value, maxLength) => Array.from(String(value || '')).slice(0, maxLength).join('');\nconst isFictionCategory = categoryName => cleanText(categoryName).replace(/\\s/g, '').includes('소설/시/희곡');\nconst collectionPattern = /(모음집|작품집|단편집|단편선|중단편선|소설집|선집|전집|문집|문학전집|대표작|대표작품|걸작선|명작선|베스트|컬렉션|앤솔로지|옴니버스|합본|세트|시리즈|완역본\\s*세트|\\b[0-9]+권\\b|\\b[0-9]+\\s*권\\b|\\b[상중하]\\b)/;\nconst isNonNovelTitle = title => /(속의|연구|이해|문학사|비평|평론|해설|강의|읽기|작법|이론|사전|논문|총서|선집|전집|교재|기독교|불교|철학|역사와|문화와)/.test(title) || collectionPattern.test(title);\nconst isNonNovelCategory = categoryName => /(문학이론|문학비평|작가론|문학사|종교|인문학|대학교재|논문|비평|전집|선집|작품집|단편집)/.test(categoryName);\n\nconst response = parsePayload(rawResponse);\nconst items = Array.isArray(response?.item) ? response.item : [];\nconst books = items\n  .map((item, index) => ({\n    title: cleanText(item.title),\n    author: truncateText(cleanText(item.author), 20),\n    category: batch.category,\n    isbn13: cleanText(item.isbn13 || item.isbn),\n    publisher: cleanText(item.publisher),\n    published_at: parseDate(item.pubDate),\n    aladin_item_id: item.itemId ? Number(item.itemId) : null,\n    aladin_link: cleanText(item.link),\n    aladin_cover_url: cleanText(item.cover),\n    aladin_category_name: cleanText(item.categoryName),\n    aladin_rank: item.bestRank ? Number(item.bestRank) : ((Number(batch.start) - 1) * Number(batch.maxResults)) + index + 1,\n  }))\n  .filter(book => book.title && book.author)\n  .filter(book => isFictionCategory(book.aladin_category_name))\n  .filter(book => !isNonNovelTitle(book.title) && !isNonNovelCategory(book.aladin_category_name))\n  .filter(book => isKoreanTitleOnly(book.title))\n  .filter(book => !hasBrokenOrOriginalScript(book.title) && !hasBrokenOrOriginalScript(book.author))\n  .map(book => ({\n    json: {\n      ...book,\n      skip_insert: false,\n      normalized_title: normalize(book.title),\n      normalized_author: normalize(book.author),\n    },\n  }));\n\nif (books.length === 0) {\n  return [{\n    json: {\n      skip_insert: true,\n      listType: batch.listType,\n      start: batch.start,\n      category: batch.category,\n      aladin_item_count: items.length,\n      reason: '문학 베스트셀러 응답은 있었지만 필터 통과 도서가 없습니다.',\n    },\n  }];\n}\n\nreturn books;"
+      },
+      "id": "parse-aladin-response",
+      "name": "알라딘 응답 정리",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        880,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO books (\n  title,\n  author,\n  normalized_title,\n  normalized_author,\n  category,\n  isbn13,\n  publisher,\n  published_at,\n  aladin_status,\n  aladin_item_id,\n  aladin_link,\n  aladin_cover_url,\n  aladin_category_name,\n  cover_image_url,\n  retry_count,\n  next_retry_at,\n  error_reason,\n  validated_at\n)\nVALUES (\n  '{{ $json.title.replace(/'/g, \"''\") }}',\n  '{{ $json.author.replace(/'/g, \"''\") }}',\n  '{{ $json.normalized_title.replace(/'/g, \"''\") }}',\n  '{{ $json.normalized_author.replace(/'/g, \"''\") }}',\n  '{{ $json.category.replace(/'/g, \"''\") }}',\n  {{ $json.isbn13 ? \"'\" + $json.isbn13.replace(/'/g, \"''\") + \"'\" : 'NULL' }},\n  {{ $json.publisher ? \"'\" + $json.publisher.replace(/'/g, \"''\") + \"'\" : 'NULL' }},\n  {{ $json.published_at ? \"'\" + $json.published_at + \"'::date\" : 'NULL' }},\n  'validated',\n  {{ $json.aladin_item_id || 'NULL' }},\n  {{ $json.aladin_link ? \"'\" + $json.aladin_link.replace(/'/g, \"''\") + \"'\" : 'NULL' }},\n  {{ $json.aladin_cover_url ? \"'\" + $json.aladin_cover_url.replace(/'/g, \"''\") + \"'\" : 'NULL' }},\n  {{ $json.aladin_category_name ? \"'\" + $json.aladin_category_name.replace(/'/g, \"''\") + \"'\" : 'NULL' }},\n  {{ $json.aladin_cover_url ? \"'\" + $json.aladin_cover_url.replace(/'/g, \"''\") + \"'\" : 'NULL' }},\n  0,\n  NOW(),\n  NULL,\n  NOW()\n)\nON CONFLICT (normalized_title, normalized_author) DO UPDATE SET\n  category = EXCLUDED.category,\n  isbn13 = COALESCE(EXCLUDED.isbn13, books.isbn13),\n  publisher = COALESCE(EXCLUDED.publisher, books.publisher),\n  published_at = COALESCE(EXCLUDED.published_at, books.published_at),\n  aladin_status = 'validated',\n  aladin_item_id = COALESCE(EXCLUDED.aladin_item_id, books.aladin_item_id),\n  aladin_link = COALESCE(EXCLUDED.aladin_link, books.aladin_link),\n  aladin_cover_url = COALESCE(EXCLUDED.aladin_cover_url, books.aladin_cover_url),\n  aladin_category_name = COALESCE(EXCLUDED.aladin_category_name, books.aladin_category_name),\n  cover_image_url = COALESCE(EXCLUDED.cover_image_url, books.cover_image_url),\n  retry_count = 0,\n  next_retry_at = NOW(),\n  error_reason = NULL,\n  validated_at = COALESCE(books.validated_at, NOW());",
+        "options": {}
+      },
+      "id": "upsert-books",
+      "name": "Books 적재",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        1300,
+        -80
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "postgres-cred",
+          "name": "PostgreSQL - depromeet-team1"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "should-insert-book",
+              "leftValue": "={{ $json.skip_insert }}",
+              "rightValue": false,
+              "operator": {
+                "type": "boolean",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "check-should-insert",
+      "name": "적재 여부 확인",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        1080,
+        0
+      ]
+    }
+  ],
+  "connections": {
+    "Manual Trigger": {
+      "main": [
+        [
+          {
+            "node": "검색 배치 생성",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "검색 배치 생성": {
+      "main": [
+        [
+          {
+            "node": "검색 배치 순회",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "검색 배치 순회": {
+      "main": [
+        [
+          {
+            "node": "알라딘 도서 검색",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        []
+      ]
+    },
+    "알라딘 도서 검색": {
+      "main": [
+        [
+          {
+            "node": "알라딘 응답 정리",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "알라딘 응답 정리": {
+      "main": [
+        [
+          {
+            "node": "적재 여부 확인",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Books 적재": {
+      "main": [
+        [
+          {
+            "node": "검색 배치 순회",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "적재 여부 확인": {
+      "main": [
+        [
+          {
+            "node": "Books 적재",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "검색 배치 순회",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  }
+}

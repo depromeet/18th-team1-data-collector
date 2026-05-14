@@ -1,0 +1,97 @@
+{
+  "name": "문장 감정 분류",
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "trigger",
+      "name": "Manual Trigger",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [0, 0]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT q.id, q.quote_raw, q.emotion_retry_count, b.title, b.author\nFROM quotes q\nJOIN books b ON b.id = q.book_id\nWHERE b.aladin_status = 'validated'\n  AND q.quote_check_status = 'validated'\n  AND q.emotion_status IN ('staged', 'retry_wait')\n  AND q.emotion_next_retry_at <= NOW()\nORDER BY q.emotion_next_retry_at, q.id\nLIMIT 10;",
+        "options": {
+          "nodeVersion": 2.5
+        }
+      },
+      "id": "load-emotion-targets",
+      "name": "감정 분류 대상 조회",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [220, 0],
+      "credentials": {
+        "postgres": {
+          "id": "postgres-cred",
+          "name": "PostgreSQL - depromeet-team1"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "batchSize": 1,
+        "options": {
+          "reset": false
+        }
+      },
+      "id": "split-emotion-targets",
+      "name": "문장 순회",
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [440, 0]
+    },
+    {
+      "parameters": {
+        "jsCode": "const row = $input.first().json; const apiKey = typeof process !== 'undefined' && process.env && process.env.GROQ_API_KEY ? process.env.GROQ_API_KEY : 'YOUR_GROQ_API_KEY'; const model = 'llama-3.3-70b-versatile'; const taxonomy = { valence: ['negative', 'neutral', 'positive'], situation_tags: ['혼자인 순간', '누군가 그리운 날', '지친 하루', '상처받은 관계', '불안한 밤', '무기력한 순간', '생각이 많은 밤', '잔잔한 하루', '조용히 정리하고 싶은 순간', '어딘가 머물고 싶은 순간', '따뜻한 위로를 나누고 싶은 순간', '새로운 시작 앞에 선 순간', '스스로를 다독이고 싶은 순간', '용기를 내고 싶은 순간', '영감을 얻고 싶은 순간'], purpose_tags: ['공감', '위로', '영감', '몰입', '동기부여', '회복', '성찰'], emotion_tags: ['외로움', '그리움', '쓸쓸함', '불안', '슬픔', '분노', '평온', '안도', '희망', '용기', '다정함', '감동', '사색', '회복감', '기쁨'] }; const backoffSteps = [1, 3, 10, 30, 120]; const nextRetryCount = Number(row.emotion_retry_count || 0) + 1; const nextRetryAt = new Date(Date.now() + backoffSteps[Math.min(nextRetryCount - 1, backoffSteps.length - 1)] * 60000).toISOString(); const prompt = `다음 책 문장을 고정 taxonomy 안에서만 분류하세요.\\n\\n책: ${row.title} (${row.author})\\n문장: ${row.quote_raw}\\n\\nTaxonomy: ${JSON.stringify(taxonomy)}\\n\\n규칙:\\n- situation_tags는 최대 3개\\n- purpose_tags는 최대 2개\\n- emotion_candidates는 emotion_tags 안에서 최대 3개, 각 항목은 {\\\"tag\\\":\\\"태그\\\",\\\"score\\\":0.0~1.0}\\n- 설명 없이 JSON 객체만 반환\\n\\n출력 형식:\\n{\\\"valence\\\":\\\"negative\\\",\\\"situation_tags\\\":[\\\"혼자인 순간\\\"],\\\"purpose_tags\\\":[\\\"공감\\\"],\\\"emotion_candidates\\\":[{\\\"tag\\\":\\\"외로움\\\",\\\"score\\\":0.82}]}`; const response = await fetch('https://api.groq.com/openai/v1/chat/completions', { method: 'POST', headers: { Authorization: `Bearer ${apiKey}`, 'content-type': 'application/json' }, body: JSON.stringify({ model, temperature: 0.2, max_tokens: 350, messages: [{ role: 'user', content: prompt }] }) }).catch(error => ({ ok: false, status: 0, json: async () => ({ error: { message: error.message } }) })); const payload = typeof response.json === 'function' ? await response.json().catch(() => ({})) : {}; if (!response.ok) { return [{ json: { ...row, emotion_status: 'retry_wait', emotion_retry_count: nextRetryCount, emotion_next_retry_at: nextRetryAt, emotion_error_reason: payload?.error?.message || `emotion_${response.status}`, emotion_model: model, emotion_valence: null, situation_tags: [], purpose_tags: [], emotion_candidates: [] } }]; } const text = payload?.choices?.[0]?.message?.content || ''; const cleaned = text.replace(/```json\\s*/gi, '').replace(/```/g, '').trim(); const start = cleaned.indexOf('{'); const end = cleaned.lastIndexOf('}'); if (start === -1 || end === -1 || end <= start) { return [{ json: { ...row, emotion_status: 'needs_review', emotion_retry_count: row.emotion_retry_count || 0, emotion_next_retry_at: new Date().toISOString(), emotion_error_reason: 'emotion_parse_failed', emotion_model: model, emotion_valence: null, situation_tags: [], purpose_tags: [], emotion_candidates: [] } }]; } let result; try { result = JSON.parse(cleaned.slice(start, end + 1)); } catch (error) { return [{ json: { ...row, emotion_status: 'needs_review', emotion_retry_count: row.emotion_retry_count || 0, emotion_next_retry_at: new Date().toISOString(), emotion_error_reason: `emotion_json:${error.message}`, emotion_model: model, emotion_valence: null, situation_tags: [], purpose_tags: [], emotion_candidates: [] } }]; } const valence = taxonomy.valence.includes(result.valence) ? result.valence : null; const situationTags = Array.isArray(result.situation_tags) ? result.situation_tags.filter(tag => taxonomy.situation_tags.includes(tag)).slice(0, 3) : []; const purposeTags = Array.isArray(result.purpose_tags) ? result.purpose_tags.filter(tag => taxonomy.purpose_tags.includes(tag)).slice(0, 2) : []; const emotionCandidates = Array.isArray(result.emotion_candidates) ? result.emotion_candidates.filter(item => item && taxonomy.emotion_tags.includes(item.tag)).slice(0, 3).map(item => ({ tag: item.tag, score: Number(item.score || 0) })) : []; if (!valence || situationTags.length === 0 || purposeTags.length === 0 || emotionCandidates.length === 0) { return [{ json: { ...row, emotion_status: 'needs_review', emotion_retry_count: row.emotion_retry_count || 0, emotion_next_retry_at: new Date().toISOString(), emotion_error_reason: 'emotion_taxonomy_empty', emotion_model: model, emotion_valence: valence, situation_tags: situationTags, purpose_tags: purposeTags, emotion_candidates: emotionCandidates } }]; } return [{ json: { ...row, emotion_status: 'validated', emotion_retry_count: 0, emotion_next_retry_at: new Date().toISOString(), emotion_error_reason: null, emotion_model: model, emotion_valence: valence, situation_tags: situationTags, purpose_tags: purposeTags, emotion_candidates: emotionCandidates, classified_at: new Date().toISOString() } }];"
+      },
+      "id": "classify-emotion",
+      "name": "LLM 감정 분류",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [660, 0]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "UPDATE quotes\nSET emotion_status = '{{ $json.emotion_status }}',\n    emotion_retry_count = {{ $json.emotion_retry_count || 0 }},\n    emotion_next_retry_at = '{{ $json.emotion_next_retry_at }}'::timestamp,\n    emotion_error_reason = {{ $json.emotion_error_reason ? \"'\" + $json.emotion_error_reason.replace(/'/g, \"''\") + \"'\" : 'NULL' }},\n    emotion_model = {{ $json.emotion_model ? \"'\" + $json.emotion_model.replace(/'/g, \"''\") + \"'\" : 'NULL' }},\n    emotion_valence = {{ $json.emotion_valence ? \"'\" + $json.emotion_valence.replace(/'/g, \"''\") + \"'\" : 'NULL' }},\n    emotion_candidates = {{ \"'\" + JSON.stringify($json.emotion_candidates || []).replace(/'/g, \"''\") + \"'::jsonb\" }},\n    situation_tags = {{ ($json.situation_tags || []).length ? 'ARRAY[' + $json.situation_tags.map(tag => \"'\" + tag.replace(/'/g, \"''\") + \"'\").join(',') + ']::TEXT[]' : 'ARRAY[]::TEXT[]' }},\n    purpose_tags = {{ ($json.purpose_tags || []).length ? 'ARRAY[' + $json.purpose_tags.map(tag => \"'\" + tag.replace(/'/g, \"''\") + \"'\").join(',') + ']::TEXT[]' : 'ARRAY[]::TEXT[]' }},\n    classified_at = {{ $json.classified_at ? \"'\" + $json.classified_at + \"'::timestamp\" : 'classified_at' }}\nWHERE id = {{ $json.id }};",
+        "options": {}
+      },
+      "id": "update-emotion",
+      "name": "감정 컬럼 업데이트",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [880, 0],
+      "credentials": {
+        "postgres": {
+          "id": "postgres-cred",
+          "name": "PostgreSQL - depromeet-team1"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Manual Trigger": {
+      "main": [[{ "node": "감정 분류 대상 조회", "type": "main", "index": 0 }]]
+    },
+    "감정 분류 대상 조회": {
+      "main": [[{ "node": "문장 순회", "type": "main", "index": 0 }]]
+    },
+    "문장 순회": {
+      "main": [
+        [{ "node": "LLM 감정 분류", "type": "main", "index": 0 }],
+        []
+      ]
+    },
+    "LLM 감정 분류": {
+      "main": [[{ "node": "감정 컬럼 업데이트", "type": "main", "index": 0 }]]
+    },
+    "감정 컬럼 업데이트": {
+      "main": [[{ "node": "문장 순회", "type": "main", "index": 0 }]]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  }
+}
