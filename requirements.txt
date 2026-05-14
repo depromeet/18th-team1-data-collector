@@ -1,0 +1,5 @@
+fastapi>=0.115
+uvicorn[standard]>=0.34
+torch>=2.5
+transformers>=4.45
+sentence-transformers>=3.3

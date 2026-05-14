@@ -1,7 +1,7 @@
 {
   "name": "18th-team1-data-collector",
   "version": "1.0.0",
-  "description": "This repository contains an `n8n` pipeline for collecting novel quotes, processing emotion labels and embeddings, and storing the results in PostgreSQL with `pgvector`.",
+  "description": "n8n pipeline for collecting Aladin novel metadata, extracting verified quotes, classifying emotions, and storing pgvector embeddings.",
   "homepage": "https://github.com/depromeet/18th-team1-data-collector#readme",
   "bugs": {
     "url": "https://github.com/depromeet/18th-team1-data-collector/issues"
@@ -18,7 +18,8 @@
     "doc": "docs"
   },
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1",
+    "test": "npm run validate",
+    "validate": "find n8n -name '*.json' -print0 | xargs -0 jq empty && python3 -m py_compile model/emotion/app.py model/embedding/app.py",
     "prepare": "husky"
   },
   "keywords": [],
