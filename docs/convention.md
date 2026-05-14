@@ -4,188 +4,95 @@
 
 Git Flow 기반 + PR 중심 협업 방식을 사용합니다.
 
-### 브랜치 구조
+- `main`: 운영 배포 브랜치
+- `dev`: 통합 개발 브랜치
+- `feat/#이슈번호/설명`: 기능 개발
+- `fix/#이슈번호/설명`: 버그 수정
+- `refactor/#이슈번호/설명`: 구조 개선
+- `chore/#이슈번호/설명`: 설정, 문서, 인프라 작업
+- `hotfix/*`: 운영 긴급 수정
 
-- `main` : 실제 운영 배포 브랜치
-- `dev` : 통합 개발 브랜치 (default)
-- `feat/#이슈번호/설명` : 기능 개발
-- `fix/#이슈번호/설명` : 버그 수정
-- `chore/#이슈번호/설명` : 설정, 인프라 등
-- `release/*` : 배포 준비
-- `hotfix/*` : 운영 긴급 수정
+작업 흐름:
 
-### 브랜치 네이밍 예시
-
+```text
+이슈 생성 -> 브랜치 생성 -> 작업 -> PR -> 리뷰 -> merge(dev) -> 배포(main)
 ```
-chore/#1/init
-feat/#10/user-signup
-fix/#15/token-expired
-```
-
-### 작업 흐름
-
-> 이슈 생성 → 브랜치 생성 → 작업 → PR → 리뷰 → merge(dev) → 배포(main)
-
-- 모든 작업은 **이슈 기반으로 진행**
-- 브랜치는 반드시 **이슈와 연결 (트래킹 필수)**
-
----
 
 ## 2. 커밋 컨벤션
 
-### 기본 규칙
+Conventional Commits를 사용합니다. `commit-msg` 훅이 타입을 검증하고 이모지를 자동으로 붙입니다.
 
-- **Conventional Commits 기반**
-- 메시지는 **의미 중심 + 간결하게 작성**
-- `commit-msg` 훅이 **이모지를 자동으로 prefix** 해줌
-
-### 커밋 타입
-
-| 타입 | 이모지 | 설명 |
-|------|--------|------|
-| feat | ✨ | 새로운 기능 추가 |
-| fix | 🐛 | 버그 수정 |
-| perf | ⚡️ | 성능 개선 |
-| refactor | ♻️ | 리팩토링 (기능 변화 X) |
-| test | ✅ | 테스트 추가/수정 |
-| docs | 📝 | 문서 수정 |
-| style | 💄 | 코드 포맷팅 (로직 X) |
-| chore | 🔧 | 빌드 설정, 패키지 매니저 등 |
-| ci | 🔁 | CI 설정 변경 |
-| build | 📦 | 빌드 시스템 변경 |
-| revert | ⏪ | 커밋 되돌리기 |
-
-### 작성 예시
-
-```
-feat: 회원가입 API 추가
-```
-→ 훅이 자동으로 변환:
-```
-✨ feat: 회원가입 API 추가
+```text
+feat: 명문장 추출 워크플로우 추가
 ```
 
-### 커밋 제어
+허용 타입:
 
-- `husky` + 커스텀 `commit-msg` 훅 사용
-- 잘못된 커밋 타입 → 커밋 차단
+| 타입 | 설명 |
+|------|------|
+| feat | 새로운 기능 |
+| fix | 버그 수정 |
+| perf | 성능 개선 |
+| refactor | 동작 변경 없는 구조 개선 |
+| test | 테스트 추가/수정 |
+| docs | 문서 수정 |
+| style | 포맷팅 |
+| chore | 설정/관리 작업 |
+| ci | CI 변경 |
+| build | 빌드 변경 |
+| revert | 되돌리기 |
 
----
+## 3. 프로젝트 구성
 
-## 3. PR 리뷰 룰
+이 레포는 n8n 중심의 데이터 파이프라인입니다.
 
-### 기본 원칙
+- `n8n/`: import 가능한 n8n workflow JSON
+- `db/`: PostgreSQL, pgvector 스키마 초기화 SQL
+- `model/embedding`: quote embedding FastAPI API
+- `model/emotion`: legacy/local emotion FastAPI API
+- `docs/`: 협업 문서
 
-- 최소 **1명 이상 Approve 필요**
-- 리뷰 요청 후 **24시간 내 응답**
+주요 데이터 흐름:
 
-### 예외 (hotfix)
-
-- `main` hotfix는 **셀프 머지 가능**
-- 단, 반드시 팀에 공유
-- 문제 발생 시 책임 명확
-
----
-
-## 4. Issue / PR 템플릿
-
-### 목적
-
-- 작업 맥락 공유
-- 리뷰 효율 향상
-- 커뮤니케이션 비용 감소
-
-### 이슈 템플릿
-
-- **Feature** (`.github/ISSUE_TEMPLATE/01-feature.yml`) — 적용 완료
-- **Fix** (`.github/ISSUE_TEMPLATE/02-fix.yml`) — 미적용
-- **Refactor** (`.github/ISSUE_TEMPLATE/03-refactor.yml`) — 미적용
-
-### PR 템플릿
-
-`.github/pull_request_template.md` — 적용 완료
-
----
-
-## 5. 코드 스타일
-
-### 기본 원칙
-
-- **가독성 우선**
-- **일관성 유지**
-
-### 규칙
-
-- 축약어 사용 ❌
-- DTO → `data class` 사용 (Kotlin)
-- 메서드 길이 **7줄 이내 권장**
-- `else / else-if` 지양 → **early return**
-- Builder 패턴 사용
-- 추후 필요하면 추가 예정
-
----
-
-## 6. 기술 스택
-
-### Backend
-
-- Kotlin
-- Spring Framework
-
-### Database / Cache
-
-- PostgreSQL
-- Redis
-
-### Observability
-
-- Spring Actuator
-- Prometheus
-- Grafana
-
-### Infra
-
-- GCP (Compute Engine, VPC)
-- Docker
-- Terraform
-- GitHub Actions (CI/CD)
-
----
-
-## 7. 아키텍처 & 구조
-
-### 구조 방향
-
-- 초기: 단일 모듈
-- 이후: 멀티 모듈 확장
-
-### 아키텍처
-
-- Layered Architecture
-
-```
-Controller → UseCase(Facade) → Service → Repository
+```text
+Aladin 책 수집 -> 책 본문 기반 명문장 추출 -> 문장 검수 -> 감정 분류 -> 임베딩 저장
 ```
 
----
+## 4. 기술 스택
 
-## 8. 환경 변수 & 시크릿 관리
+- n8n
+- PostgreSQL + pgvector
+- Groq Chat Completions API
+- FastAPI
+- sentence-transformers
+- transformers / PyTorch
+- Husky
 
-### Git 서브모듈 기반 시크릿 관리 (미적용)
+## 5. 코드/워크플로우 규칙
 
-- 민감 정보는 레포 분리
-- 해당 레포는 프라이빗
+- n8n workflow JSON은 import 가능한 상태를 유지합니다.
+- 외부 API key는 workflow에 직접 커밋하지 않고 n8n runtime environment 또는 credentials로 주입합니다.
+- SQL은 기존 DB에 재실행해도 깨지지 않도록 `IF NOT EXISTS`와 명시적 migration을 함께 사용합니다.
+- LLM 결과는 후속 단계에서 검증 가능한 형태로 저장합니다.
+- 명문장 추출은 책 본문 소스에 실제 포함된 문장만 통과시킵니다.
+- Python API 의존성은 `requirements.txt`에 추가합니다.
+- 생성 산출물(`__pycache__`, `.pyc`)은 커밋하지 않습니다.
 
----
+## 6. 검증
 
-## 9. AI 활용 전략
+로컬 검증:
 
-### 목적
+```bash
+npm test
+```
 
-- 생산성 향상
-- 코드 품질 개선
+검증 내용:
 
-### 도구
+- `jq`로 n8n workflow JSON 문법 검사
+- `python3 -m py_compile`로 Python FastAPI 진입점 문법 검사
 
-- 코드 리뷰: CodeRabbit (미적용)
-- 모델 활용: HuggingFace (Emotion Classification)
+## 7. PR 리뷰 룰
+
+- 최소 1명 이상 approve 후 merge합니다.
+- workflow 변경 PR은 import 가능 여부와 연결 노드 흐름을 함께 확인합니다.
+- DB 변경 PR은 기존 DB에 재실행했을 때의 영향을 함께 설명합니다.
